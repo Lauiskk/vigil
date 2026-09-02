@@ -182,6 +182,11 @@ tasks:
           -d '{"perSecond":2000,"seconds":20}'
         echo
 
+  capture:
+    desc: Record a live run to testdata/trace.json, for the offline fallback
+    cmds:
+      - go run ./cmd/capture -url http://localhost:8080 -out testdata/trace.json -for 100s
+
   stats:
     desc: Current throughput and latency
     cmds:

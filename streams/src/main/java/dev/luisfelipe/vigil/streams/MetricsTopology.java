@@ -15,6 +15,7 @@ import org.apache.kafka.streams.kstream.Consumed;
 import org.apache.kafka.streams.kstream.Grouped;
 import org.apache.kafka.streams.kstream.Materialized;
 import org.apache.kafka.streams.kstream.Produced;
+import org.apache.kafka.streams.kstream.Suppressed;
 import org.apache.kafka.streams.kstream.TimeWindows;
 import org.apache.kafka.streams.kstream.Windowed;
 
@@ -54,6 +55,16 @@ public final class MetricsTopology {
                         Stats::empty,
                         (stream, value, agg) -> agg.add(value),
                         Materialized.with(Serdes.String(), statsSerde))
+
+                // Emit once per closed window, not once per record.
+                //
+                // A KTable produces a downstream record on every update, so
+                // without this a ten-second window over a few thousand events
+                // publishes a few thousand running totals — and a consumer
+                // reading "the window's count" sees it climb rather than
+                // seeing the count. Suppression costs the grace period in
+                // latency and buys a result that means what it says.
+                .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()))
 
                 .toStream()
                 .map(MetricsTopology::toRecord)
