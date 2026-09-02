@@ -46,7 +46,10 @@ services:
       GEN_ADDR: ":8081"
       LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:
-      - "127.0.0.1:8081:8081"
+      # Overridable, because 8080 and its neighbours are popular and a clone
+      # that cannot start on a machine with something else on that port is a
+      # clone that gets abandoned. GATEWAY_PORT=9090 docker compose up.
+      - "127.0.0.1:${GENERATOR_PORT:-8081}:8081"
     depends_on:
       redpanda:
         condition: service_healthy
@@ -65,7 +68,7 @@ services:
     ports:
       # A range, because `docker compose up --scale processor=2` is the whole
       # rebalance demonstration and a fixed port would forbid it.
-      - "127.0.0.1:8082-8083:8082"
+      - "127.0.0.1:${PROCESSOR_PORT_RANGE:-8082-8083}:8082"
     depends_on:
       redpanda:
         condition: service_healthy
@@ -83,7 +86,7 @@ services:
       GATEWAY_ADDR: ":8080"
       LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:${GATEWAY_PORT:-8080}:8080"
     depends_on:
       redpanda:
         condition: service_healthy
@@ -129,7 +132,12 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - vigil_localstack:/var/lib/localstack
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/health | grep -q '\"lambda\": \"available\"'"]
+      # Either state counts. A LocalStack service reports "available" until it
+      # is first used and "running" afterwards, so matching only "available"
+      # passes at start-up and then fails forever from the first invocation —
+      # taking anything that waits on service_healthy down with it on the next
+      # restart.
+      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/health | grep -Eq '\"lambda\": \"(available|running)\"'"]
       interval: 6s
       timeout: 5s
       retries: 30
@@ -173,7 +181,7 @@ services:
     environment:
       KAFKA_BROKERS: redpanda:9092
     ports:
-      - "127.0.0.1:8090:8080"
+      - "127.0.0.1:${CONSOLE_PORT:-8090}:8080"
     depends_on:
       redpanda:
         condition: service_healthy

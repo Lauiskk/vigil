@@ -128,6 +128,12 @@ task up                    # the same thing, plus a friendlier message
 task up:ui                 # ...and Redpanda Console on :8090
 ```
 
+Every published port is overridable, because 8080 is a popular address:
+
+```bash
+GATEWAY_PORT=9090 docker compose up      # or put it in .env
+```
+
 Then:
 
 ```bash
