@@ -237,6 +237,41 @@ func TestSweepFiresStallForAnAbandonedJob(t *testing.T) {
 	if repeat := e.Sweep(); len(repeat) != 0 {
 		t.Errorf("sweep repeated the stall %d times", len(repeat))
 	}
+
+	// And once reported, the key is gone — so it does not re-raise the same
+	// alert every cooldown for as long as it stays silent.
+	if e.Store().Len() != 0 {
+		t.Error("a key reported as stalled is still being tracked")
+	}
+	c.advance(time.Hour)
+	if repeat := e.Sweep(); len(repeat) != 0 {
+		t.Errorf("an hour later the dead key raised %d more alerts", len(repeat))
+	}
+}
+
+// A permanently dead entity must be reported once, not once per cooldown.
+func TestASilentKeyIsReportedOnlyOnce(t *testing.T) {
+	e, c := newEngine()
+	for i := 0; i < 5; i++ {
+		_, err := e.Ingest(domain.Event{
+			ID: "j" + time.Duration(i).String(), Stream: domain.StreamVideo,
+			Key: "job-dead", At: base, Value: 30, Unit: "fps",
+			Labels: map[string]string{domain.LabelStatus: "running"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	total := 0
+	// Twenty minutes of sweeping, well past several cooldown periods.
+	for i := 0; i < 40; i++ {
+		c.advance(30 * time.Second)
+		total += len(e.Sweep())
+	}
+	if total != 1 {
+		t.Errorf("one permanently silent job produced %d alerts over twenty minutes, want 1", total)
+	}
 }
 
 // Payments has no sweep interval — a card that goes quiet is not a fault —

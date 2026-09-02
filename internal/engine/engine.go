@@ -196,9 +196,24 @@ func (e *Engine) Sweep() []domain.Alert {
 
 	out := make([]domain.Alert, 0, len(found))
 	for _, c := range found {
-		if a, ok := e.admit(c.alert, c.cooldown, now); ok {
-			out = append(out, a)
+		a, ok := e.admit(c.alert, c.cooldown, now)
+		if !ok {
+			continue
 		}
+		out = append(out, a)
+
+		// Having reported that a key went silent, forget it.
+		//
+		// Otherwise the cooldown alone governs, and a key that is silent
+		// permanently — a job whose worker died, a sensor that was
+		// unplugged — re-raises the same alert every cooldown until the
+		// idle eviction eventually collects it an hour later. Reporting a
+		// permanent condition once is the useful behaviour; repeating it is
+		// how an alert feed becomes something people stop reading.
+		//
+		// If the entity comes back it is simply a new key with fresh state,
+		// which is the right reading of what happened.
+		e.store.Drop(state.Key{Stream: a.Stream, ID: a.Key})
 	}
 	e.pruneCooldown(now)
 	return out

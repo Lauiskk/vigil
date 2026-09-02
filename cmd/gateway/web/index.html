@@ -11,8 +11,11 @@
     --ink: #fff; --ink-2: #a8b2d1; --ink-3: #8892b0;
     --cyan: #0ff; --magenta: #f0f; --purple: #9d00ff; --blue: #00a8ff;
     --yellow: #ffee00; --pink: #ff006e;
-    --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
-    --display: 'Orbitron', var(--mono);
+    /* No webfont: the page ships no external requests, and naming a family
+       that may or may not be installed locally would render two ways. The
+       portfolio embed supplies Orbitron itself. */
+    --mono: ui-monospace, 'JetBrains Mono', SFMono-Regular, Menlo, Consolas, monospace;
+    --display: var(--mono);
   }
   * { box-sizing: border-box; }
   body {

@@ -43,12 +43,20 @@ func (s *Sensors) Faults() []Fault {
 	return []Fault{FaultAirQuality, FaultSensorSpike, FaultSensorOffline}
 }
 
-// sensorAt derives a sensor from its index: a grid reference, a position
-// around Goiânia, and a stable personal baseline.
-func sensorAt(i int) (id string, lat, lon, baseline float64) {
+// districts name the parts of the city the mesh covers, so a reading says
+// where it came from rather than repeating the sensor id back at the reader.
+var districts = []string{
+	"Setor Bueno", "Setor Marista", "Setor Oeste", "Campinas",
+	"Setor Central", "Jardim Goiás", "Setor Sul", "Vila Nova",
+}
+
+// sensorAt derives a sensor from its index: a grid reference, a district, a
+// position around Goiânia, and a stable personal baseline.
+func sensorAt(i int) (id, district string, lat, lon, baseline float64) {
 	row := rune('A' + i/8)
 	col := i%8 + 1
 	id = fmt.Sprintf("grid-%c%d", row, col)
+	district = districts[i/8%len(districts)]
 	// A ~10 km mesh over the city.
 	lat = -16.6869 + float64(i/8-4)*0.02
 	lon = -49.2648 + float64(i%8-4)*0.02
@@ -57,7 +65,7 @@ func sensorAt(i int) (id string, lat, lon, baseline float64) {
 }
 
 func (s *Sensors) reading(i int, at time.Time, value float64) domain.Event {
-	id, lat, lon, _ := sensorAt(i)
+	id, district, lat, lon, _ := sensorAt(i)
 	return domain.Event{
 		ID:     s.ids.next(),
 		Stream: domain.StreamSensors,
@@ -65,7 +73,7 @@ func (s *Sensors) reading(i int, at time.Time, value float64) domain.Event {
 		At:     at,
 		Value:  round2(value),
 		Unit:   "µg/m³",
-		Geo:    &domain.Geo{Lat: lat, Lon: lon, Place: id},
+		Geo:    &domain.Geo{Lat: lat, Lon: lon, Place: district},
 		Labels: map[string]string{"metric": "pm25", "model": "SDS011"},
 	}
 }
@@ -80,7 +88,7 @@ func (s *Sensors) Tick(now time.Time, rate int) []domain.Event {
 		idx := s.cursor % sensorGrid
 		s.cursor++
 
-		id, _, _, baseline := sensorAt(idx)
+		id, _, _, _, baseline := sensorAt(idx)
 		if s.sched.muted(id, now) {
 			continue
 		}
@@ -98,7 +106,7 @@ func (s *Sensors) Tick(now time.Time, rate int) []domain.Event {
 
 func (s *Sensors) Inject(f Fault, now time.Time) (string, error) {
 	idx := s.rng.intn(sensorGrid)
-	id, _, _, baseline := sensorAt(idx)
+	id, _, _, _, baseline := sensorAt(idx)
 
 	switch f {
 	case FaultAirQuality:
