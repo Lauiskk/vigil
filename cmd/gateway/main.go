@@ -72,6 +72,7 @@ type gateway struct {
 	sampleEvery   atomic.Int64
 	absenceAlerts atomic.Uint64
 	clockSkewed   atomic.Uint64
+	windows       atomic.Uint64
 	startedAt     time.Time
 }
 
@@ -91,7 +92,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 	g.sampleEvery.Store(1)
 
 	cl, err := kafkax.NewClient(kafkax.ConfigFromEnv("vigil-gateway"),
-		kgo.ConsumeTopics(kafkax.TopicAlerts, kafkax.TopicEvents),
+		kgo.ConsumeTopics(kafkax.TopicAlerts, kafkax.TopicEvents, kafkax.TopicMetrics),
 		// No consumer group and no committed offsets: the dashboard shows
 		// what is happening now. Resuming where a previous viewer left off
 		// would replay stale traffic as though it were live.
@@ -129,6 +130,8 @@ func (g *gateway) consume(ctx context.Context, cl *kgo.Client) {
 				g.onAlert(rec)
 			case kafkax.TopicEvents:
 				g.onEvent(rec)
+			case kafkax.TopicMetrics:
+				g.onWindow(rec)
 			}
 		})
 	}
@@ -187,6 +190,19 @@ func (g *gateway) onEvent(rec *kgo.Record) {
 	g.publish("event", map[string]any{"event": ev})
 }
 
+// onWindow forwards a closed window from the Kafka Streams topology.
+//
+// The record is relayed rather than re-parsed: it is already the JSON the
+// dashboard wants, and decoding it here only to encode it again would create
+// a second place where the aggregate's shape is defined.
+func (g *gateway) onWindow(rec *kgo.Record) {
+	if len(rec.Value) == 0 {
+		return
+	}
+	g.windows.Add(1)
+	g.broker.Publish(append(append([]byte(`{"type":"window","window":`), rec.Value...), '}'))
+}
+
 func (g *gateway) publish(kind string, payload map[string]any) {
 	payload["type"] = kind
 	body, err := json.Marshal(payload)
@@ -238,6 +254,7 @@ func (g *gateway) snapshot() map[string]any {
 		"subscribers":     subscribers,
 		"droppedToSlow":   dropped,
 		"absenceAlerts":   g.absenceAlerts.Load(),
+		"windows":         g.windows.Load(),
 		"clockSkewed":     g.clockSkewed.Load(),
 		"uptimeSeconds":   int(time.Since(g.startedAt).Seconds()),
 	}

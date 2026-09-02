@@ -88,6 +88,23 @@ services:
       redpanda:
         condition: service_healthy
 
+  # The Kafka Streams topology: tumbling aggregation over the event stream
+  # into vigil.metrics. It is Java because Kafka Streams is Java — see
+  # docs/decisions/0001 for why the detection path is not.
+  streams:
+    build:
+      context: ./streams
+    container_name: vigil_streams
+    restart: unless-stopped
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      APPLICATION_ID: vigil-streams
+      WINDOW_SECONDS: "10"
+      GRACE_SECONDS: "5"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
   # Redpanda's own web UI: topics, partitions, consumer groups, and the
   # dead-letter contents. `docker compose --profile ui up`.
   console:

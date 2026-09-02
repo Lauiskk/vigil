@@ -149,7 +149,7 @@ KAFKA_BROKERS=localhost:19092 go run ./cmd/gateway
 
 Go 1.25+. Nothing else is required, and there are no credentials to configure.
 
-## Five topics, and that is the entire budget
+## Five topics, and why that number is load-bearing
 
 | Topic | Partitions | Carries |
 |---|---|---|
@@ -164,6 +164,22 @@ no card and no expiry — allows **five topics of two partitions**. That ceiling
 why all three streams share one input topic rather than getting one apiece. It
 is a design constraint, not an oversight: a sixth topic changes the hosting
 story.
+
+**The Kafka Streams service does not fit inside it.** Re-keying events from
+entity to stream name forces a shuffle, so Streams provisions a repartition
+topic and a changelog for its state store — seven topics in total, and it
+manages them itself:
+
+```
+vigil-streams-KSTREAM-AGGREGATE-STATE-STORE-0000000003-repartition
+vigil-streams-KSTREAM-AGGREGATE-STATE-STORE-0000000003-changelog
+```
+
+That is the honest shape of the trade. The Go processor's changelog is one
+topic that was chosen and named deliberately; Kafka Streams created two without
+being asked, which is exactly the convenience it exists to provide and exactly
+what makes it not free. A free-tier deployment runs the Go core; a self-hosted
+one runs everything. `docker compose up` has no such limit and runs all of it.
 
 Two partitions is also enough for the demonstration worth making. Run
 `task scale`, stop one processor, and watch the survivor take both partitions

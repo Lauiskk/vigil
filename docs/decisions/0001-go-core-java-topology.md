@@ -69,6 +69,23 @@ serve two consumers that do not need it is the wrong trade.
 If the alert stream ever fed something that charges money, this decision would
 have to be revisited, and the note above is where to start.
 
+## An unpriced cost: internal topics
+
+Kafka Streams manages its own topics. Re-keying from entity to stream name
+forces a shuffle, so it provisions a repartition topic, and the windowed
+aggregation needs a changelog for its state store. Two topics appear that
+nobody asked for.
+
+That is precisely the convenience the library exists to provide, and on a
+self-hosted broker it costs nothing to think about. On the managed free tier
+this project targets — five topics, two partitions each — it is the difference
+between fitting and not. The Go processor's changelog is one topic, chosen and
+named; Streams took two more on its own initiative.
+
+The consequence is that the free-tier deployment runs the Go core and the
+self-hosted one runs everything. Worth knowing before choosing Kafka Streams
+for anything with a topic quota, which is most managed offerings.
+
 ## Consequences
 
 **Good.** One language for the pipeline, small static binaries, no JVM in the
