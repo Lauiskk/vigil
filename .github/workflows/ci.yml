@@ -1,0 +1,140 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A second push to the same branch supersedes the first; there is no value in
+# finishing a run whose result nobody will read.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: go — vet, race tests, coverage gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Matched to go.mod. aws-lambda-go requires 1.26.
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "these files need gofmt:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        run: go test ./... -race -count=1
+
+      # The five packages above the Kafka line hold pure logic and are
+      # decidable without a broker, so anything uncovered in them is untested
+      # by choice. The gate says so out loud rather than trusting a habit.
+      - name: coverage gate
+        run: |
+          go test ./internal/domain/... ./internal/rules/... ./internal/window/... \
+                  ./internal/state/... ./internal/engine/... \
+                  -covermode=atomic -coverprofile=coverage.out -count=1
+          pct=$(go tool cover -func=coverage.out | awk '/^total:/ {print substr($3, 1, length($3)-1)}')
+          echo "pure-package coverage: ${pct}%"
+          awk -v got="$pct" 'BEGIN { exit !(got >= 100) }' || {
+            echo "::error::coverage ${pct}% is below the required 100%"
+            go tool cover -func=coverage.out | awk '$3 != "100.0%"'
+            exit 1
+          }
+
+      - name: build every binary
+        run: |
+          for cmd in ./cmd/*; do
+            go build -o /dev/null "$cmd"
+          done
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /dev/null ./lambda/alerts
+
+  integration:
+    name: go — against a real broker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Brought up through the repo's own compose file rather than a `services:`
+      # block. A service container cannot be given a command, and the Redpanda
+      # image needs `redpanda start --mode dev-container` — and this way the
+      # compose file that everyone else runs is itself under test.
+      - name: start the broker
+        run: |
+          docker compose up -d redpanda
+          for i in $(seq 1 30); do
+            if [ "$(docker inspect -f '{{.State.Health.Status}}' vigil_redpanda)" = healthy ]; then
+              echo "broker healthy after ${i} checks"; exit 0
+            fi
+            sleep 4
+          done
+          echo "::error::the broker never became healthy"
+          docker compose logs redpanda
+          exit 1
+
+      - name: integration tests
+        env:
+          KAFKA_BROKERS: localhost:19092
+        run: go test ./internal/stream/... -race -count=1 -tags integration -v
+
+      - name: broker logs on failure
+        if: failure()
+        run: docker compose logs redpanda
+
+  java:
+    name: java — kafka streams topology
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: test
+        working-directory: streams
+        run: mvn -B test
+
+      - name: package
+        working-directory: streams
+        run: mvn -B -DskipTests package
+
+  terraform:
+    name: terraform — fmt and validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+
+      - name: fmt
+        run: terraform -chdir=infra/terraform fmt -check -diff
+
+      - name: validate
+        run: |
+          # archive_file needs its source to exist before validate will run.
+          mkdir -p dist && touch dist/bootstrap
+          terraform -chdir=infra/terraform init -backend=false -input=false
+          terraform -chdir=infra/terraform validate

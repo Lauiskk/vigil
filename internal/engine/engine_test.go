@@ -424,3 +424,95 @@ func TestRandomIDFallsBackWhenEntropyFails(t *testing.T) {
 		t.Errorf("fallback id = %q, want 8 characters", id)
 	}
 }
+
+// A changelog replay can hand back a key for a stream this build has no
+// profile for — after a rename, or a rollback to a version that predates it.
+// Sweeping must step over it rather than panic on the missing profile.
+func TestSweepIgnoresKeysForUnknownStreams(t *testing.T) {
+	store := state.New()
+	store.Add(
+		state.Key{Stream: domain.Stream("retired-stream"), ID: "orphan-1"},
+		state.Geometry{Window: time.Minute, MaxPoints: 8},
+		window.Point{ID: "p1", At: base, Value: 1},
+		base,
+	)
+
+	c := &clock{t: base.Add(time.Hour)}
+	e := New(rules.DefaultProfiles(), WithClock(c.now), WithStore(store))
+
+	alerts := e.Sweep()
+	if len(alerts) != 0 {
+		t.Errorf("an orphaned key raised %d alerts", len(alerts))
+	}
+	// And it is left alone rather than quietly dropped: deciding what to do
+	// with unrecognised state is not the sweep's call.
+	if e.Store().Len() != 1 {
+		t.Error("the orphaned key was removed by a sweep that should have skipped it")
+	}
+}
+
+// A flapping entity — one that goes quiet, comes back, and goes quiet again —
+// must not raise a fresh alert on every cycle. Reporting a silent key drops
+// it, so the second silence looks like a brand new key; only the cooldown,
+// which outlives the key, stops the feed filling with the same fact.
+//
+// Uses its own profile rather than the default one. Video's cooldown (a
+// minute) is shorter than its stall threshold (ninety seconds), so a swept
+// stall there can never be suppressed — the second silence always takes
+// longer to develop than the cooldown takes to lapse. A configuration where
+// the cooldown is the longer of the two is perfectly reasonable and is where
+// this matters.
+func TestSweepSuppressesAFlappingKey(t *testing.T) {
+	c := &clock{t: base}
+	profiles := map[domain.Stream]rules.Profile{
+		domain.StreamVideo: {
+			Stream:     domain.StreamVideo,
+			Window:     5 * time.Minute,
+			MaxPoints:  64,
+			Cooldown:   5 * time.Minute,
+			SweepEvery: 10 * time.Second,
+			Rules: []rules.Rule{
+				rules.Stall{After: 30 * time.Second, On: []domain.Stream{domain.StreamVideo}},
+			},
+		},
+	}
+	e := New(profiles, WithClock(c.now))
+
+	report := func(id string) {
+		t.Helper()
+		if _, err := e.Ingest(domain.Event{
+			ID: id, Stream: domain.StreamVideo, Key: "job-flap",
+			At: c.t, Value: 30, Unit: "fps",
+			Labels: map[string]string{domain.LabelStatus: "running"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	report("first")
+	c.advance(40 * time.Second) // past the 30s stall threshold
+	if got := e.Sweep(); len(got) != 1 {
+		t.Fatalf("first silence raised %d alerts, want 1", len(got))
+	}
+	if e.Store().Len() != 0 {
+		t.Fatal("the reported key was not dropped")
+	}
+
+	// It comes back, then goes quiet again — still well inside the five-minute
+	// cooldown the dropped key left behind.
+	report("second")
+	c.advance(40 * time.Second)
+	if got := e.Sweep(); len(got) != 0 {
+		t.Errorf("the second silence raised %d alerts inside the cooldown, want 0", len(got))
+	}
+	if e.Stats().Suppressed.Load() == 0 {
+		t.Error("the suppression was not counted")
+	}
+
+	// Once the cooldown does lapse, it is news again.
+	report("third")
+	c.advance(6 * time.Minute)
+	if got := e.Sweep(); len(got) != 1 {
+		t.Errorf("after the cooldown expired, got %d alerts, want 1", len(got))
+	}
+}
