@@ -138,20 +138,21 @@ func (p *Payments) Inject(f Fault, now time.Time) (string, error) {
 		// three seconds later. Nothing about that is ambiguous.
 		far := pick(p.rng, farCities)
 		here := p.authorisation(c, now)
-		there := p.authorisation(c, now.Add(3*time.Second))
+		there := p.authorisation(c, now)
 		there.Geo = &domain.Geo{Lat: far.lat, Lon: far.lon, Place: far.name}
 		there.Value = round2(c.typical * 12)
-		p.sched.add(here, there)
+		p.sched.add(now, here)
+		p.sched.add(now.Add(3*time.Second), there)
 
 	case FaultCardTesting:
 		// Two dozen R$ 1,00 authorisations in eight seconds: someone walking
 		// a stolen card number to find out whether it is live.
 		const n = 24
 		for i := 0; i < n; i++ {
-			ev := p.authorisation(c, now.Add(time.Duration(i)*8*time.Second/n))
+			ev := p.authorisation(c, now)
 			ev.Value = 1
 			ev.Labels["merchant"] = "—"
-			p.sched.add(ev)
+			p.sched.add(now.Add(time.Duration(i)*8*time.Second/n), ev)
 		}
 
 	case FaultAmountAnomaly:
@@ -160,12 +161,12 @@ func (p *Payments) Inject(f Fault, now time.Time) (string, error) {
 		// rule it is named after rather than tripping a different one.
 		const priming = 14
 		for i := 0; i < priming; i++ {
-			p.sched.add(p.authorisation(c, now.Add(time.Duration(i)*2*time.Second)))
+			p.sched.add(now.Add(time.Duration(i)*2*time.Second), p.authorisation(c, now))
 		}
-		big := p.authorisation(c, now.Add(priming*2*time.Second+time.Second))
+		big := p.authorisation(c, now)
 		big.Value = round2(c.typical * 40)
 		big.Labels["merchant"] = "Joalheria Vivara"
-		p.sched.add(big)
+		p.sched.add(now.Add(priming*2*time.Second+time.Second), big)
 
 	default:
 		return "", fmt.Errorf("%w: %s does not implement %q", ErrUnknownFault, p.Stream(), f)

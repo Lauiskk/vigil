@@ -224,6 +224,14 @@ func TestSweepFiresStallForAnAbandonedJob(t *testing.T) {
 	if alerts[0].Rule != "stall" || alerts[0].Key != "job-2" {
 		t.Errorf("alert = %+v", alerts[0])
 	}
+	// Swept alerts must declare themselves, or their multi-minute interval
+	// pollutes every latency percentile downstream.
+	if !alerts[0].Absence {
+		t.Error("a swept alert was not marked as absence-raised")
+	}
+	if _, ok := alerts[0].PipelineLatency(); ok {
+		t.Error("an absence alert reported a usable pipeline latency")
+	}
 
 	// The cooldown applies to swept alerts too.
 	if repeat := e.Sweep(); len(repeat) != 0 {

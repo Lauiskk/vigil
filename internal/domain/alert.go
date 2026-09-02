@@ -50,7 +50,37 @@ type Alert struct {
 
 	// EventIDs are the records that produced this alert, newest last.
 	EventIDs []string `json:"eventIds,omitempty"`
+
+	// Absence marks an alert raised because events stopped arriving.
+	//
+	// For these, At is the last observation rather than a triggering event,
+	// so the interval to DetectedAt is how long the entity has been silent —
+	// minutes, by design. It is not pipeline latency, and letting it into a
+	// latency metric turns a p99 of forty milliseconds into one of four
+	// minutes and makes the number worthless.
+	Absence bool `json:"absence,omitempty"`
 }
 
-// Latency is the time from the triggering event to the detection decision.
+// Latency is the interval from At to the detection decision.
+//
+// It is only pipeline latency when Absence is false; see that field. The
+// value is signed on purpose: a negative one means the producer's clock ran
+// ahead of the consumer's, and silently clamping it here would hide a real
+// operational fault. Callers that aggregate should use PipelineLatency.
 func (a Alert) Latency() time.Duration { return a.DetectedAt.Sub(a.At) }
+
+// PipelineLatency reports how long this alert took to travel the pipeline,
+// and whether that question is meaningful for it at all.
+//
+// It is not meaningful for an absence alert, nor when the clocks disagree —
+// both would otherwise contribute nonsense to a percentile that people read
+// as "how fast is this thing".
+func (a Alert) PipelineLatency() (d time.Duration, ok bool) {
+	if a.Absence {
+		return 0, false
+	}
+	if d = a.Latency(); d < 0 {
+		return d, false
+	}
+	return d, true
+}

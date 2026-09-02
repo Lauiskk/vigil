@@ -176,9 +176,9 @@ func (v *Video) Inject(f Fault, now time.Time) (string, error) {
 		// plus the limit to be the thing that trips it.
 		const n = 24
 		for i := 0; i < n; i++ {
-			ev := v.event(j, now.Add(time.Duration(i)*6*time.Second/n), "retrying")
+			ev := v.event(j, now, "retrying")
 			ev.Labels["attempt"] = fmt.Sprintf("%d", i+1)
-			v.sched.add(ev)
+			v.sched.add(now.Add(time.Duration(i)*6*time.Second/n), ev)
 		}
 
 	default:

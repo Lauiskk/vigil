@@ -1,0 +1,108 @@
+# The whole pipeline, one command. Redpanda rather than Kafka: it speaks the
+# same protocol, runs in about a gigabyte instead of four, and needs no JVM and
+# no ZooKeeper — which is the difference between `docker compose up` working on
+# a laptop and not.
+name: vigil
+
+services:
+  redpanda:
+    image: redpandadata/redpanda:v25.2.5
+    container_name: vigil_redpanda
+    restart: unless-stopped
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --memory=1G
+      - --reserve-memory=0M
+      - --overprovisioned
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+    ports:
+      # Loopback only. The broker is never reachable from outside this machine.
+      - "127.0.0.1:19092:19092"
+      - "127.0.0.1:9644:9644"
+    volumes:
+      - vigil_redpanda:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  generator:
+    build:
+      context: .
+      args:
+        SERVICE: generator
+    container_name: vigil_generator
+    restart: unless-stopped
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      GEN_ADDR: ":8081"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "127.0.0.1:8081:8081"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+  processor:
+    build:
+      context: .
+      args:
+        SERVICE: processor
+    restart: unless-stopped
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      KAFKA_GROUP: vigil-processor
+      PROC_ADDR: ":8082"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      # A range, because `docker compose up --scale processor=2` is the whole
+      # rebalance demonstration and a fixed port would forbid it.
+      - "127.0.0.1:8082-8083:8082"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+  gateway:
+    build:
+      context: .
+      args:
+        SERVICE: gateway
+    container_name: vigil_gateway
+    restart: unless-stopped
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      GENERATOR_URL: http://generator:8081
+      GATEWAY_ADDR: ":8080"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+  # Redpanda's own web UI: topics, partitions, consumer groups, and the
+  # dead-letter contents. `docker compose --profile ui up`.
+  console:
+    image: redpandadata/console:v3.4.0
+    container_name: vigil_console
+    profiles: ["ui"]
+    restart: unless-stopped
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+    ports:
+      - "127.0.0.1:8090:8080"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+volumes:
+  vigil_redpanda:
+    name: vigil_redpanda

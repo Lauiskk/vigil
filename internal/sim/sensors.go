@@ -113,9 +113,9 @@ func (s *Sensors) Inject(f Fault, now time.Time) (string, error) {
 		// it one. Kept well inside the velocity limit.
 		const priming = 18
 		for i := 0; i < priming; i++ {
-			s.sched.add(s.reading(idx, now.Add(time.Duration(i)*2*time.Second), s.rng.normal(baseline, baseline*0.18)))
+			s.sched.add(now.Add(time.Duration(i)*2*time.Second), s.reading(idx, now, s.rng.normal(baseline, baseline*0.18)))
 		}
-		s.sched.add(s.reading(idx, now.Add(priming*2*time.Second+time.Second), baseline*9))
+		s.sched.add(now.Add(priming*2*time.Second+time.Second), s.reading(idx, now, baseline*9))
 
 	case FaultSensorOffline:
 		s.sched.mute(id, now.Add(5*time.Minute))

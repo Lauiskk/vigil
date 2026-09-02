@@ -52,15 +52,31 @@ type Source interface {
 	Faults() []Fault
 }
 
+// pending is one fault event and the moment it should be emitted.
+//
+// The release time and the event's own timestamp are deliberately separate.
+// An event is stamped at the instant it is emitted, never in advance, because
+// time.Now().Add(d) produces a wall-clock reading that assumes the wall clock
+// advances at the same rate as the monotonic clock. Under NTP slew it does
+// not — measurably so under virtualisation — and a timestamp computed that
+// way, once serialised, is in the future. Downstream that arrives as an
+// alert detected before the event that caused it.
+type pending struct {
+	releaseAt time.Time
+	ev        domain.Event
+}
+
 // scheduled is a fault's worth of events waiting for their moment.
 //
 // Faults are queued rather than emitted immediately because the interesting
-// ones are shapes over time: a card tested fifteen times in eight seconds, an
-// encoder starved for a minute. Emitting them at once would trip a different
-// rule than the one being demonstrated.
+// ones are shapes over time: a card tested two dozen times in eight seconds,
+// an encoder starved for a minute. Emitting them at once would trip a
+// different rule than the one being demonstrated. The shape survives because
+// each event is released on its own tick and stamped then, so the intervals
+// between them are preserved without any of them being stamped ahead.
 type scheduled struct {
 	mu     sync.Mutex
-	queue  []domain.Event // ordered by At
+	queue  []pending
 	silent map[string]time.Time
 }
 
@@ -68,32 +84,36 @@ func newScheduled() *scheduled {
 	return &scheduled{silent: make(map[string]time.Time)}
 }
 
-// add queues events, keeping the queue ordered by event time.
-func (s *scheduled) add(evs ...domain.Event) {
+// add queues an event for release at the given time, keeping the queue ordered.
+func (s *scheduled) add(releaseAt time.Time, ev domain.Event) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.queue = append(s.queue, evs...)
+	s.queue = append(s.queue, pending{releaseAt: releaseAt, ev: ev})
 	// Insertion sort: the queue is short and almost always already ordered.
-	for i := 1; i < len(s.queue); i++ {
-		for j := i; j > 0 && s.queue[j].At.Before(s.queue[j-1].At); j-- {
-			s.queue[j], s.queue[j-1] = s.queue[j-1], s.queue[j]
-		}
+	for i := len(s.queue) - 1; i > 0 && s.queue[i].releaseAt.Before(s.queue[i-1].releaseAt); i-- {
+		s.queue[i], s.queue[i-1] = s.queue[i-1], s.queue[i]
 	}
 }
 
-// due removes and returns everything scheduled at or before now.
+// due removes and returns everything scheduled at or before now, stamping each
+// event with now as it goes.
 func (s *scheduled) due(now time.Time) []domain.Event {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	i := 0
-	for i < len(s.queue) && !s.queue[i].At.After(now) {
+	for i < len(s.queue) && !s.queue[i].releaseAt.After(now) {
 		i++
 	}
 	if i == 0 {
 		return nil
 	}
-	out := s.queue[:i:i]
-	s.queue = append([]domain.Event(nil), s.queue[i:]...)
+	out := make([]domain.Event, i)
+	for j := 0; j < i; j++ {
+		out[j] = s.queue[j].ev
+		out[j].At = now
+	}
+	s.queue = append([]pending(nil), s.queue[i:]...)
 	return out
 }
 

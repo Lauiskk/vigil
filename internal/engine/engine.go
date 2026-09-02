@@ -29,7 +29,7 @@ type Engine struct {
 	now func() time.Time
 
 	mu       sync.Mutex
-	cooldown map[cooldownKey]time.Time
+	cooldown map[cooldownKey]suppression
 
 	runID string
 	seq   atomic.Uint64
@@ -41,6 +41,13 @@ type cooldownKey struct {
 	stream domain.Stream
 	key    string
 	rule   string
+}
+
+// suppression is an active cooldown: when it lapses, and how bad things were
+// when it was set.
+type suppression struct {
+	until    time.Time
+	severity domain.Severity
 }
 
 // Stats is a snapshot of what the engine has done, for the metrics endpoint
@@ -69,7 +76,7 @@ func New(profiles map[domain.Stream]rules.Profile, opts ...Option) *Engine {
 		profiles: profiles,
 		store:    state.New(),
 		now:      time.Now,
-		cooldown: make(map[cooldownKey]time.Time),
+		cooldown: make(map[cooldownKey]suppression),
 		runID:    randomID(),
 	}
 	for _, o := range opts {
@@ -178,6 +185,9 @@ func (e *Engine) Sweep() []domain.Alert {
 				continue
 			}
 			if alert := sweeper.Sweep(k.Stream, k.ID, w, now); alert != nil {
+				// Raised by silence, so its timestamps describe idle time
+				// rather than pipeline latency.
+				alert.Absence = true
 				found = append(found, candidate{*alert, profile.Cooldown})
 			}
 		}
@@ -196,16 +206,21 @@ func (e *Engine) Sweep() []domain.Alert {
 
 // admit stamps an identifier on an alert and applies the per-rule cooldown.
 // A card being tested forty times is one fact, not thirty alerts.
+//
+// The exception is escalation. A condition that has got materially worse is
+// new information, so a higher severity passes the cooldown even though the
+// same rule fired moments ago — otherwise the first, mildest reading of an
+// unfolding attack is the only one anybody ever sees.
 func (e *Engine) admit(a domain.Alert, cooldown time.Duration, now time.Time) (domain.Alert, bool) {
 	ck := cooldownKey{stream: a.Stream, key: a.Key, rule: a.Rule}
 
 	e.mu.Lock()
-	if until, ok := e.cooldown[ck]; ok && now.Before(until) {
+	if held, ok := e.cooldown[ck]; ok && now.Before(held.until) && a.Severity.Rank() <= held.severity.Rank() {
 		e.mu.Unlock()
 		e.stats.Suppressed.Add(1)
 		return domain.Alert{}, false
 	}
-	e.cooldown[ck] = now.Add(cooldown)
+	e.cooldown[ck] = suppression{until: now.Add(cooldown), severity: a.Severity}
 	e.mu.Unlock()
 
 	a.ID = fmt.Sprintf("%s-%d", e.runID, e.seq.Add(1))
@@ -228,8 +243,8 @@ func (e *Engine) clearCooldown(stream domain.Stream, key string) {
 func (e *Engine) pruneCooldown(now time.Time) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	for ck, until := range e.cooldown {
-		if now.After(until) {
+	for ck, held := range e.cooldown {
+		if now.After(held.until) {
 			delete(e.cooldown, ck)
 		}
 	}

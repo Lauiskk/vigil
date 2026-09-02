@@ -30,6 +30,15 @@ type ZScore struct {
 	// the unit being measured treats the cause. Zero disables the floor.
 	MinDelta float64
 
+	// Below, when false, means only values above the mean are anomalies.
+	//
+	// Symmetric detection is right for money — an unusually small charge on a
+	// card that habitually spends is its own signal — and wrong for a
+	// threshold-shaped measurement, where a reading falling back to baseline
+	// after an elevated period is a large deviation and also just recovery.
+	// Alerting on it says "Reading spike" about a number going down.
+	Below bool
+
 	On []domain.Stream
 }
 
@@ -49,6 +58,9 @@ func (r ZScore) Eval(ev domain.Event, w *window.Sliding, now time.Time) *domain.
 		return nil
 	}
 
+	if !r.Below && ev.Value < mean {
+		return nil
+	}
 	delta := math.Abs(ev.Value - mean)
 	if delta < r.MinDelta {
 		return nil

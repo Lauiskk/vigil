@@ -52,59 +52,101 @@ var now = base.Add(time.Hour)
 func TestVelocity(t *testing.T) {
 	rule := Velocity{Max: 10, Per: time.Minute, On: []domain.Stream{domain.StreamPayments}}
 
-	burst := func(n int) []domain.Event {
+	// n events evenly spaced, so the span — and therefore the rate — is exact.
+	burst := func(n int, spacing time.Duration) []domain.Event {
 		out := make([]domain.Event, 0, n)
 		for i := 0; i < n; i++ {
-			out = append(out, ev(domain.StreamPayments, "card-1", time.Duration(i)*time.Second, 1, nil))
+			out = append(out, ev(domain.StreamPayments, "card-1", time.Duration(i)*spacing, 1, nil))
 		}
 		return out
 	}
 
-	tests := []struct {
-		name    string
-		count   int
-		wantHit bool
-		wantSev domain.Severity
-	}{
-		{"below the limit", 5, false, ""},
-		{"exactly at the limit is not an alert", 10, false, ""},
-		{"one over", 11, true, domain.SeverityInfo},
-		{"well over", 13, true, domain.SeverityWarn},
-		{"double the limit", 20, true, domain.SeverityCritical},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			w, last := feed(time.Minute, 0, burst(tc.count)...)
-			got := rule.Eval(last, w, now)
-			if !tc.wantHit {
-				if got != nil {
-					t.Fatalf("expected no alert, got %+v", got)
+	t.Run("the count decides whether it fires", func(t *testing.T) {
+		tests := []struct {
+			name    string
+			count   int
+			wantHit bool
+		}{
+			{"below the limit", 5, false},
+			{"exactly at the limit is not an alert", 10, false},
+			{"one over", 11, true},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				w, last := feed(time.Minute, 0, burst(tc.count, time.Second)...)
+				got := rule.Eval(last, w, now)
+				if tc.wantHit != (got != nil) {
+					t.Fatalf("alert = %v, want %v", got != nil, tc.wantHit)
 				}
-				return
-			}
-			if got == nil {
-				t.Fatal("expected an alert, got nil")
-			}
-			if got.Rule != "velocity" || got.Key != "card-1" {
-				t.Errorf("wrong identity: rule=%q key=%q", got.Rule, got.Key)
-			}
-			if got.Title != "Card testing" {
-				t.Errorf("Title = %q, want the payments phrasing", got.Title)
-			}
-			if got.Severity != tc.wantSev {
-				t.Errorf("Severity = %q, want %q", got.Severity, tc.wantSev)
-			}
-			if got.Evidence["count"].(int) != tc.count {
-				t.Errorf("evidence count = %v, want %d", got.Evidence["count"], tc.count)
-			}
-			if got.DetectedAt != now {
-				t.Error("DetectedAt was not taken from the injected clock")
-			}
-			if len(got.EventIDs) > 12 {
-				t.Errorf("EventIDs = %d, should be capped at 12", len(got.EventIDs))
-			}
-		})
-	}
+			})
+		}
+	})
+
+	// The rate decides how bad it is. The rule fires the instant the limit is
+	// crossed, so the count is always limit+1 at that moment — grading on it
+	// would make every velocity alert equally mild.
+	t.Run("the rate decides how severe it is", func(t *testing.T) {
+		tests := []struct {
+			name    string
+			spacing time.Duration
+			wantSev domain.Severity
+		}{
+			{"eleven spread across the whole minute", 5500 * time.Millisecond, domain.SeverityInfo},
+			{"eleven in forty-five seconds", 4500 * time.Millisecond, domain.SeverityWarn},
+			{"eleven in thirty seconds", 3 * time.Second, domain.SeverityCritical},
+			{"eleven in ten seconds", time.Second, domain.SeverityCritical},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				w, last := feed(time.Minute, 0, burst(11, tc.spacing)...)
+				got := rule.Eval(last, w, now)
+				if got == nil {
+					t.Fatal("expected an alert")
+				}
+				if got.Severity != tc.wantSev {
+					t.Errorf("Severity = %q, want %q (rate %v/s against %v/s allowed)",
+						got.Severity, tc.wantSev,
+						got.Evidence["perSecond"], got.Evidence["allowedPerSecond"])
+				}
+			})
+		}
+	})
+
+	t.Run("the alert carries what a reader needs", func(t *testing.T) {
+		w, last := feed(time.Minute, 0, burst(24, 300*time.Millisecond)...)
+		got := rule.Eval(last, w, now)
+		if got == nil {
+			t.Fatal("expected an alert")
+		}
+		if got.Rule != "velocity" || got.Key != "card-1" {
+			t.Errorf("wrong identity: rule=%q key=%q", got.Rule, got.Key)
+		}
+		if got.Title != "Card testing" {
+			t.Errorf("Title = %q, want the payments phrasing", got.Title)
+		}
+		if got.Evidence["count"].(int) != 24 {
+			t.Errorf("evidence count = %v, want 24", got.Evidence["count"])
+		}
+		if got.DetectedAt != now {
+			t.Error("DetectedAt was not taken from the injected clock")
+		}
+		if len(got.EventIDs) > 12 {
+			t.Errorf("EventIDs = %d, should be capped at 12", len(got.EventIDs))
+		}
+	})
+
+	// Per is only used to describe the limit, so a zero must not divide.
+	t.Run("a rule with no stated period still grades", func(t *testing.T) {
+		bare := Velocity{Max: 10}
+		w, last := feed(time.Minute, 0, burst(11, time.Second)...)
+		got := bare.Eval(last, w, now)
+		if got == nil {
+			t.Fatal("expected an alert")
+		}
+		if got.Severity != domain.SeverityCritical {
+			t.Errorf("Severity = %q; an unstated allowance cannot be graded against, so it must be critical", got.Severity)
+		}
+	})
 }
 
 func TestVelocityAppliesTo(t *testing.T) {
@@ -293,7 +335,7 @@ func TestZScore(t *testing.T) {
 
 	t.Run("an unusually small charge reports the direction", func(t *testing.T) {
 		w, last := feed(time.Hour, 0, historyThen(-500)...)
-		got := rule.Eval(last, w, now)
+		got := ZScore{K: 3.5, MinSamples: 12, Below: true, On: []domain.Stream{domain.StreamPayments}}.Eval(last, w, now)
 		if got == nil {
 			t.Fatal("expected an alert")
 		}
@@ -583,4 +625,42 @@ func tightHistory(final float64) []domain.Event {
 		evs = append(evs, ev(domain.StreamSensors, "grid-A1", time.Duration(i)*time.Second, v, nil))
 	}
 	return append(evs, ev(domain.StreamSensors, "grid-A1", time.Duration(len(tight))*time.Second, final, nil))
+}
+
+// A measurement returning to baseline is a large deviation and not an event.
+func TestZScoreDirection(t *testing.T) {
+	// A sensor held high, then dropping back to where it started. The
+	// readings vary: a perfectly flat history has no scale to measure
+	// against and the rule declines to judge it at all.
+	held := []float64{181, 184, 182, 186, 183, 180, 185, 183, 182, 187, 181, 184, 183}
+	elevated := make([]domain.Event, 0, len(held)+1)
+	for i, v := range held {
+		elevated = append(elevated, ev(domain.StreamSensors, "grid-C8", time.Duration(i)*time.Second, v, nil))
+	}
+	recovery := append(append([]domain.Event{}, elevated...),
+		ev(domain.StreamSensors, "grid-C8", 13*time.Second, 17.31, nil))
+	spike := append(append([]domain.Event{}, elevated...),
+		ev(domain.StreamSensors, "grid-C8", 13*time.Second, 900, nil))
+
+	upOnly := ZScore{K: 3, MinSamples: 12, On: []domain.Stream{domain.StreamSensors}}
+	symmetric := ZScore{K: 3, MinSamples: 12, Below: true, On: []domain.Stream{domain.StreamSensors}}
+
+	t.Run("recovery is not a spike", func(t *testing.T) {
+		w, last := feed(time.Hour, 0, recovery...)
+		if got := upOnly.Eval(last, w, now); got != nil {
+			t.Errorf("air quality improving raised %q: %s", got.Title, got.Detail)
+		}
+	})
+	t.Run("a genuine spike still fires", func(t *testing.T) {
+		w, last := feed(time.Hour, 0, spike...)
+		if got := upOnly.Eval(last, w, now); got == nil {
+			t.Error("expected an alert for a reading far above the baseline")
+		}
+	})
+	t.Run("symmetric detection still sees the drop", func(t *testing.T) {
+		w, last := feed(time.Hour, 0, recovery...)
+		if got := symmetric.Eval(last, w, now); got == nil {
+			t.Error("with Below set, a large drop should still register")
+		}
+	})
 }

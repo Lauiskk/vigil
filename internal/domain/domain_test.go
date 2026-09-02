@@ -145,3 +145,56 @@ func TestEventTerminal(t *testing.T) {
 		t.Error("an event with no labels is not terminal")
 	}
 }
+
+func TestPipelineLatency(t *testing.T) {
+	at := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name    string
+		alert   Alert
+		wantOK  bool
+		wantDur time.Duration
+	}{
+		{
+			"an ordinary detection",
+			Alert{At: at, DetectedAt: at.Add(42 * time.Millisecond)},
+			true, 42 * time.Millisecond,
+		},
+		{
+			// A stalled job has been silent for minutes by design. Counting
+			// that as latency turns a p99 of 40ms into one of 4 minutes.
+			"an absence alert is not latency at all",
+			Alert{At: at, DetectedAt: at.Add(4 * time.Minute), Absence: true},
+			false, 0,
+		},
+		{
+			// Producer and consumer clocks disagree. Real in production, and
+			// nonsense to average into a percentile.
+			"clock skew is reported, not clamped away",
+			Alert{At: at, DetectedAt: at.Add(-1500 * time.Millisecond)},
+			false, -1500 * time.Millisecond,
+		},
+		{
+			"a zero interval is still valid",
+			Alert{At: at, DetectedAt: at},
+			true, 0,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := tc.alert.PipelineLatency()
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if got != tc.wantDur {
+				t.Errorf("duration = %v, want %v", got, tc.wantDur)
+			}
+		})
+	}
+
+	// Latency itself stays signed so an operator can see the skew.
+	skewed := Alert{At: at, DetectedAt: at.Add(-time.Second)}
+	if skewed.Latency() != -time.Second {
+		t.Errorf("Latency = %v, want the raw signed value", skewed.Latency())
+	}
+}

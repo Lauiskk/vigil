@@ -190,3 +190,72 @@ func summarise(alerts []domain.Alert) string {
 	}
 	return out
 }
+
+// A scheduled event must be stamped when it is emitted, never in advance.
+//
+// Regression test. Faults used to be built with timestamps derived as
+// now.Add(d), which keeps the monotonic reading — so release timing was right
+// — but serialises a wall-clock value computed as if the wall clock advanced
+// at the monotonic rate. Under NTP slew it does not, and the difference
+// reached 1.5 seconds over a 30-second horizon on an ordinary virtualised
+// host. Downstream that arrived as an alert detected a second and a half
+// before the event that caused it, and it silently poisoned every latency
+// percentile the dashboard reported.
+func TestScheduledEventsAreStampedAtRelease(t *testing.T) {
+	sources := []struct {
+		name  string
+		src   sim.Source
+		fault sim.Fault
+	}{
+		{"impossible travel", sim.NewPayments(31), sim.FaultImpossibleTravel},
+		{"card testing", sim.NewPayments(32), sim.FaultCardTesting},
+		{"amount anomaly", sim.NewPayments(33), sim.FaultAmountAnomaly},
+		{"retry storm", sim.NewVideo(34), sim.FaultRetryStorm},
+		{"sensor spike", sim.NewSensors(35), sim.FaultSensorSpike},
+	}
+	for _, tc := range sources {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := tc.src.Inject(tc.fault, base); err != nil {
+				t.Fatal(err)
+			}
+			now, seen := base, 0
+			for i := 0; i < 3000; i++ { // five minutes at 100ms
+				for _, ev := range tc.src.Tick(now, 1) {
+					seen++
+					if !ev.At.Equal(now) {
+						t.Fatalf("event %s emitted at %v carries the timestamp %v — a stamp that is not the emission instant will read as skew downstream",
+							ev.ID, now, ev.At)
+					}
+				}
+				now = now.Add(tick)
+			}
+			if seen == 0 {
+				t.Fatal("the source emitted nothing to check")
+			}
+		})
+	}
+}
+
+// The point of queueing faults is their shape over time, so restamping at
+// release must not collapse the intervals between them.
+func TestInjectedFaultsKeepTheirShape(t *testing.T) {
+	src := sim.NewPayments(41)
+	if _, err := src.Inject(sim.FaultImpossibleTravel, base); err != nil {
+		t.Fatal(err)
+	}
+
+	var stamps []time.Time
+	now := base
+	for i := 0; i < 100 && len(stamps) < 2; i++ {
+		for _, ev := range src.Tick(now, 0) { // no ordinary traffic
+			stamps = append(stamps, ev.At)
+		}
+		now = now.Add(tick)
+	}
+	if len(stamps) < 2 {
+		t.Fatalf("expected two events from impossible travel, got %d", len(stamps))
+	}
+	if gap := stamps[1].Sub(stamps[0]); gap < 2900*time.Millisecond || gap > 3100*time.Millisecond {
+		t.Errorf("the two legs are %v apart, want about 3s — the schedule was lost", gap)
+	}
+}

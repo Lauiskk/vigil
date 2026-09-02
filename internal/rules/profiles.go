@@ -63,7 +63,7 @@ func DefaultProfiles() map[domain.Stream]Profile {
 				GeoVelocity{MaxKmh: 1000, MinKm: 100, On: []domain.Stream{payments}},
 				// Typical spends run R$ 40–220, so a deviation under R$ 200
 				// is not worth waking anyone for however many sigma it is.
-				ZScore{K: 3.5, MinSamples: 12, MinDelta: 200, On: []domain.Stream{payments}},
+				ZScore{K: 3.5, MinSamples: 12, MinDelta: 200, Below: true, On: []domain.Stream{payments}},
 			},
 		},
 		video: {

@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vigil — real-time anomaly detection</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📡</text></svg>">
+<style>
+  :root {
+    --bg: #0a0e27; --bg-2: #151935; --hair: rgb(255 255 255 / .08);
+    --ink: #fff; --ink-2: #a8b2d1; --ink-3: #8892b0;
+    --cyan: #0ff; --magenta: #f0f; --purple: #9d00ff; --blue: #00a8ff;
+    --yellow: #ffee00; --pink: #ff006e;
+    --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    --display: 'Orbitron', var(--mono);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: var(--mono); font-size: 13px; line-height: 1.5;
+    min-height: 100vh; display: flex; flex-direction: column;
+  }
+  /* The scanline wash from the portfolio, kept faint enough to read through. */
+  body::after {
+    content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 99;
+    background: repeating-linear-gradient(0deg, rgb(0 0 0 / .15) 0 1px, transparent 1px 3px);
+    opacity: .35;
+  }
+  .clip { clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px); }
+
+  header {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 14px 20px; border-bottom: 1px solid var(--hair);
+    background: linear-gradient(180deg, var(--bg-2), transparent);
+  }
+  h1 {
+    margin: 0; font-family: var(--display); font-size: 20px; font-weight: 900;
+    letter-spacing: .22em; color: var(--cyan); text-shadow: 0 0 18px rgb(0 255 255 / .45);
+  }
+  .tag { color: var(--ink-3); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
+  .spacer { flex: 1 1 auto; }
+
+  .status { display: flex; align-items: center; gap: 7px; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); }
+  .status[data-state="live"] .dot { background: var(--cyan); box-shadow: 0 0 10px var(--cyan); animation: pulse 1.6s ease-in-out infinite; }
+  .status[data-state="live"] { color: var(--cyan); }
+  .status[data-state="down"] .dot { background: var(--pink); }
+  .status[data-state="down"] { color: var(--pink); }
+  @keyframes pulse { 50% { opacity: .35; } }
+
+  .metrics {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 1px; background: var(--hair); border-bottom: 1px solid var(--hair);
+  }
+  .metric { background: var(--bg); padding: 14px 18px; }
+  .metric .label { font-size: 10px; letter-spacing: .16em; text-transform: uppercase; color: var(--ink-3); }
+  .metric .value { font-family: var(--display); font-size: 24px; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .metric .value small { font-size: 12px; color: var(--ink-3); font-weight: 400; }
+  .m-cyan .value { color: var(--cyan); } .m-magenta .value { color: var(--magenta); }
+  .m-blue .value { color: var(--blue); } .m-purple .value { color: var(--purple); }
+
+  main { flex: 1 1 auto; display: grid; grid-template-columns: 1.35fr 1fr; gap: 1px; background: var(--hair); min-height: 0; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  section { background: var(--bg); display: flex; flex-direction: column; min-height: 0; }
+  .panel-head {
+    padding: 10px 18px; border-bottom: 1px solid var(--hair);
+    font-size: 10px; letter-spacing: .2em; text-transform: uppercase; color: var(--ink-3);
+    display: flex; align-items: center; gap: 12px;
+  }
+  .feed { flex: 1 1 auto; overflow-y: auto; padding: 8px; min-height: 220px; max-height: 58vh; }
+  .empty { color: var(--ink-3); padding: 24px 12px; text-align: center; font-size: 12px; }
+
+  .alert {
+    border-left: 3px solid var(--accent, var(--cyan)); background: var(--bg-2);
+    padding: 10px 14px; margin-bottom: 6px; animation: slide .35s cubic-bezier(.16,1,.3,1);
+  }
+  @keyframes slide { from { opacity: 0; transform: translateX(-12px); } }
+  .alert[data-sev="critical"] { --accent: var(--pink); }
+  .alert[data-sev="warn"]     { --accent: var(--yellow); }
+  .alert[data-sev="info"]     { --accent: var(--blue); }
+  .alert .top { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .alert .title { font-family: var(--display); font-size: 12px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--accent); }
+  .alert .key { color: var(--ink-2); font-size: 11px; }
+  .alert .lat { margin-left: auto; color: var(--ink-3); font-size: 10px; }
+  .alert .detail { color: var(--ink-2); margin-top: 4px; font-size: 12px; word-break: break-word; }
+  .alert .rule { color: var(--ink-3); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; margin-top: 3px; }
+
+  .event { display: flex; gap: 10px; padding: 3px 8px; font-size: 11px; color: var(--ink-2); white-space: nowrap; overflow: hidden; }
+  .event .k { color: var(--ink-3); min-width: 92px; }
+  .event .v { color: var(--cyan); min-width: 78px; text-align: right; font-variant-numeric: tabular-nums; }
+  .event .p { color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; }
+  .event[data-stream="video"] .v { color: var(--purple); }
+  .event[data-stream="sensors"] .v { color: var(--blue); }
+
+  footer { border-top: 1px solid var(--hair); padding: 12px 18px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; background: var(--bg-2); }
+  button, select {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+    background: transparent; color: var(--ink-2); border: 1px solid var(--hair);
+    padding: 8px 14px; cursor: pointer; transition: .18s;
+  }
+  button:hover:not(:disabled), select:hover { border-color: var(--cyan); color: var(--cyan); }
+  button:disabled { opacity: .35; cursor: not-allowed; }
+  select { background: var(--bg); }
+  .btn-primary { border-color: var(--magenta); color: var(--magenta); }
+  .btn-primary:hover:not(:disabled) { border-color: var(--magenta); color: var(--bg); background: var(--magenta); }
+  .note { color: var(--ink-3); font-size: 10px; margin-left: auto; }
+  .note a { color: var(--ink-2); }
+  .banner { display: none; padding: 8px 18px; background: rgb(255 0 110 / .12); border-bottom: 1px solid var(--pink); color: var(--pink); font-size: 11px; letter-spacing: .08em; }
+  .banner.on { display: block; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>VIGIL</h1>
+  <span class="tag">real-time anomaly detection · kafka</span>
+  <span class="spacer"></span>
+  <span class="status" id="status" data-state="connecting"><span class="dot"></span><span id="status-text">connecting</span></span>
+</header>
+
+<div class="banner" id="banner"></div>
+
+<div class="metrics">
+  <div class="metric m-cyan">    <div class="label">events / sec</div><div class="value" id="m-eps">0</div></div>
+  <div class="metric m-magenta"> <div class="label">alerts</div>      <div class="value" id="m-alerts">0</div></div>
+  <div class="metric m-blue">    <div class="label">detect p50</div>  <div class="value" id="m-p50">0<small>ms</small></div></div>
+  <div class="metric m-blue">    <div class="label">detect p99</div>  <div class="value" id="m-p99">0<small>ms</small></div></div>
+  <div class="metric m-purple">  <div class="label">end to end p99</div><div class="value" id="m-e2e">0<small>ms</small></div></div>
+  <div class="metric">           <div class="label">events seen</div> <div class="value" id="m-total">0</div></div>
+</div>
+
+<main>
+  <section>
+    <div class="panel-head">
+      <span>alert feed</span>
+      <select id="filter" aria-label="Filter alerts by stream">
+        <option value="">all streams</option>
+        <option value="payments">payments</option>
+        <option value="video">video</option>
+        <option value="sensors">sensors</option>
+      </select>
+    </div>
+    <div class="feed" id="alerts"><div class="empty">waiting for anomalies — ordinary traffic is quiet by design.<br>inject a fault below to see the pipeline react.</div></div>
+  </section>
+
+  <section>
+    <div class="panel-head"><span>event stream</span><span id="sample-note"></span></div>
+    <div class="feed" id="events"><div class="empty">connecting to the stream…</div></div>
+  </section>
+</main>
+
+<footer>
+  <button class="btn-primary" id="surge">⚡ surge</button>
+  <select id="stream">
+    <option value="payments">payments</option>
+    <option value="video">video</option>
+    <option value="sensors">sensors</option>
+  </select>
+  <select id="fault"></select>
+  <button id="inject">inject fault</button>
+  <span class="note">source: <a href="https://github.com/Lauiskk/vigil" target="_blank" rel="noopener">github.com/Lauiskk/vigil</a></span>
+</footer>
+
+<script>
+(() => {
+  'use strict';
+
+  const $ = (id) => document.getElementById(id);
+  // The feeds are append-only and unbounded traffic would grow the DOM without
+  // limit, so each is capped and trimmed from the far end.
+  const MAX_ALERTS = 60, MAX_EVENTS = 90;
+
+  const FAULTS = {
+    payments: ['impossible-travel', 'card-testing', 'amount-anomaly'],
+    video:    ['job-stall', 'sla-breach', 'retry-storm'],
+    sensors:  ['air-quality', 'sensor-spike', 'sensor-offline'],
+  };
+
+  const fmt = new Intl.NumberFormat('en-US');
+  const round = (n, d = 0) => Number(n ?? 0).toFixed(d);
+
+  // ── connection ──────────────────────────────────────────────────────────
+  let source = null, retry = 0;
+
+  function connect() {
+    source = new EventSource('/api/stream');
+
+    source.onopen = () => { retry = 0; setStatus('live', 'live'); };
+    source.onmessage = (e) => {
+      let msg;
+      try { msg = JSON.parse(e.data); } catch { return; }
+      if (msg.type === 'alert') addAlert(msg.alert);
+      else if (msg.type === 'event') addEvent(msg.event);
+      else if (msg.type === 'stats') setStats(msg.stats);
+    };
+    source.onerror = () => {
+      source.close();
+      setStatus('down', 'reconnecting');
+      // Exponential backoff, capped: a gateway that is down stays down for a
+      // while, and hammering it on a 1s timer helps nobody.
+      retry = Math.min(retry + 1, 6);
+      setTimeout(connect, 500 * 2 ** retry);
+    };
+  }
+
+  function setStatus(state, text) {
+    $('status').dataset.state = state;
+    $('status-text').textContent = text;
+  }
+
+  // ── rendering ───────────────────────────────────────────────────────────
+  function clearEmpty(container) {
+    const empty = container.querySelector('.empty');
+    if (empty) empty.remove();
+  }
+
+  function trim(container, max) {
+    while (container.childElementCount > max) container.lastElementChild.remove();
+  }
+
+  let streamFilter = '';
+
+  function addAlert(a) {
+    if (!a) return;
+    const feed = $('alerts');
+    clearEmpty(feed);
+
+    const el = document.createElement('div');
+    el.className = 'alert';
+    el.dataset.sev = a.severity || 'info';
+    el.dataset.stream = a.stream || '';
+    if (streamFilter && a.stream !== streamFilter) el.hidden = true;
+
+    const latency = a.detectedAt && a.at
+      ? Math.max(0, new Date(a.detectedAt) - new Date(a.at))
+      : null;
+
+    el.append(
+      node('div', 'top', [
+        node('span', 'title', a.title || a.rule),
+        node('span', 'key', a.key || ''),
+        node('span', 'lat', latency === null ? '' : latency + 'ms'),
+      ]),
+      node('div', 'detail', a.detail || ''),
+      node('div', 'rule', `${a.stream} · ${a.rule}`),
+    );
+
+    feed.prepend(el);
+    trim(feed, MAX_ALERTS);
+  }
+
+  function addEvent(ev) {
+    if (!ev) return;
+    const feed = $('events');
+    clearEmpty(feed);
+
+    const el = document.createElement('div');
+    el.className = 'event';
+    el.dataset.stream = ev.stream || '';
+    el.append(
+      node('span', 'k', ev.key || ''),
+      node('span', 'v', `${round(ev.value, 2)} ${ev.unit || ''}`),
+      node('span', 'p', ev.geo?.place || ev.labels?.merchant || ev.labels?.status || ''),
+    );
+
+    feed.prepend(el);
+    trim(feed, MAX_EVENTS);
+  }
+
+  function node(tag, cls, content) {
+    const el = document.createElement(tag);
+    el.className = cls;
+    if (Array.isArray(content)) el.append(...content);
+    else el.textContent = content ?? '';
+    return el;
+  }
+
+  function setStats(s) {
+    if (!s) return;
+    $('m-eps').textContent = fmt.format(Math.round(s.eventsPerSecond ?? 0));
+    $('m-alerts').textContent = fmt.format(s.alerts ?? 0);
+    $('m-total').textContent = fmt.format(s.events ?? 0);
+    setMs('m-p50', s.detection?.p50Ms);
+    setMs('m-p99', s.detection?.p99Ms);
+    setMs('m-e2e', s.endToEnd?.p99Ms);
+
+    // Say so when the event feed is a sample. A pane that silently shows one
+    // record in eighty is a pane that lies about the throughput beside it.
+    const every = s.sampleEvery ?? 1;
+    $('sample-note').textContent = every > 1 ? `sampled 1 in ${fmt.format(every)}` : '';
+  }
+
+  function setMs(id, value) {
+    $(id).innerHTML = `${round(value, value < 10 ? 1 : 0)}<small>ms</small>`;
+  }
+
+  // ── controls ────────────────────────────────────────────────────────────
+  function refreshFaults() {
+    const list = FAULTS[$('stream').value] || [];
+    $('fault').replaceChildren(...list.map((f) => new Option(f, f)));
+  }
+
+  function banner(text, ok) {
+    const el = $('banner');
+    el.textContent = text;
+    el.classList.toggle('on', Boolean(text));
+    el.style.color = ok ? 'var(--cyan)' : 'var(--pink)';
+    el.style.background = ok ? 'rgb(0 255 255 / .1)' : 'rgb(255 0 110 / .12)';
+    el.style.borderColor = ok ? 'var(--cyan)' : 'var(--pink)';
+    if (text) setTimeout(() => el.classList.remove('on'), 6000);
+  }
+
+  async function post(path, body, button) {
+    button.disabled = true;
+    try {
+      const res = await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        banner(data.error || `request failed (${res.status})`, false);
+        return null;
+      }
+      return data;
+    } catch {
+      banner('the gateway is not reachable', false);
+      return null;
+    } finally {
+      setTimeout(() => { button.disabled = false; }, 700);
+    }
+  }
+
+  $('stream').addEventListener('change', refreshFaults);
+
+  $('inject').addEventListener('click', async (e) => {
+    const stream = $('stream').value, fault = $('fault').value;
+    const data = await post('/api/inject', { stream, fault }, e.currentTarget);
+    if (data) banner(`injected ${fault} into ${data.key} — watch the feed`, true);
+  });
+
+  $('surge').addEventListener('click', async (e) => {
+    const data = await post('/api/surge', { perSecond: 2000, seconds: 20 }, e.currentTarget);
+    if (data) banner(`surging payments to ${fmt.format(data.perSecond)}/s for ${data.seconds}s`, true);
+  });
+
+  $('filter').addEventListener('change', (e) => {
+    streamFilter = e.target.value;
+    for (const el of $('alerts').children) {
+      if (el.classList.contains('empty')) continue;
+      el.hidden = Boolean(streamFilter) && el.dataset.stream !== streamFilter;
+    }
+  });
+
+  refreshFaults();
+  connect();
+
+  // Seed the feed from history so a fresh page is not blank on a quiet stream.
+  fetch('/api/alerts')
+    .then((r) => r.json())
+    .then((d) => (d.alerts || []).slice(-20).forEach(addAlert))
+    .catch(() => {});
+})();
+</script>
+</body>
+</html>

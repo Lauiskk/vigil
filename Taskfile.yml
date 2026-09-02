@@ -1,0 +1,145 @@
+version: '3'
+
+# Quality gates run here, not in CI alone: `task check` is what should pass
+# before a commit, and CI runs the same thing so the two cannot drift.
+
+vars:
+  # Packages that hold pure logic and are gated at full coverage. Everything
+  # they contain is decidable without a broker, so anything uncovered here is
+  # untested by choice rather than by circumstance.
+  PURE: ./internal/domain/... ./internal/rules/... ./internal/window/... ./internal/state/... ./internal/engine/...
+  COVER_MIN: 100
+
+tasks:
+  default:
+    cmds: [task: check]
+
+  check:
+    desc: Everything that must pass before a commit
+    cmds:
+      - task: fmt:check
+      - task: vet
+      - task: test
+      - task: cover
+
+  test:
+    desc: Unit tests, race detector on
+    cmds:
+      - go test ./... -race -count=1
+
+  test:short:
+    desc: Skip the slower simulation sweeps
+    cmds:
+      - go test ./... -race -count=1 -short
+
+  vet:
+    cmds:
+      - go vet ./...
+
+  fmt:
+    desc: Format in place
+    cmds:
+      - gofmt -w .
+
+  fmt:check:
+    desc: Fail if anything is unformatted
+    cmds:
+      - |
+        unformatted=$(gofmt -l .)
+        if [ -n "$unformatted" ]; then
+          echo "these files need gofmt:"; echo "$unformatted"; exit 1
+        fi
+
+  cover:
+    desc: Coverage gate on the pure packages
+    cmds:
+      - go test {{.PURE}} -covermode=atomic -coverprofile=coverage.out -count=1
+      - |
+        pct=$(go tool cover -func=coverage.out | awk '/^total:/ {print substr($3, 1, length($3)-1)}')
+        echo "pure-package coverage: ${pct}%"
+        awk -v got="$pct" -v want="{{.COVER_MIN}}" 'BEGIN { exit !(got >= want) }' || {
+          echo "coverage ${pct}% is below the required {{.COVER_MIN}}%"
+          go tool cover -func=coverage.out | awk '$3 != "100.0%"'
+          exit 1
+        }
+
+  cover:html:
+    desc: Open the coverage report
+    deps: [cover]
+    cmds:
+      - go tool cover -html=coverage.out -o coverage.html
+      - echo "wrote coverage.html"
+
+  # ── running it ──────────────────────────────────────────────────────────
+
+  up:
+    desc: Bring the whole pipeline up
+    cmds:
+      - docker compose up -d --build
+      - echo "dashboard: http://localhost:8080"
+
+  up:ui:
+    desc: Bring it up with Redpanda Console as well
+    cmds:
+      - docker compose --profile ui up -d --build
+      - echo "dashboard http://localhost:8080 · console http://localhost:8090"
+
+  down:
+    desc: Stop everything, keep the data
+    cmds: [docker compose down]
+
+  clean:
+    desc: Stop everything and discard the broker's data
+    cmds: [docker compose down -v]
+
+  logs:
+    desc: Follow the service logs
+    cmds: [docker compose logs -f generator processor gateway]
+
+  broker:
+    desc: Just the broker, for running the services from source
+    cmds:
+      - docker compose up -d redpanda
+      - echo "KAFKA_BROKERS=localhost:19092"
+
+  scale:
+    desc: Run a second processor, to watch a rebalance and a state restore
+    cmds:
+      - docker compose up -d --scale processor=2
+      - echo "now stop one and watch it reassign - docker compose logs -f processor"
+
+  # ── demonstrating it ────────────────────────────────────────────────────
+
+  inject:
+    desc: 'Inject a fault. task inject -- payments impossible-travel'
+    cmds:
+      - |
+        stream="{{index .MATCH 0}}"; fault="{{index .MATCH 1}}"
+        curl -sS -X POST http://localhost:8080/api/inject \
+          -H 'Content-Type: application/json' \
+          -d "{\"stream\":\"${stream:-payments}\",\"fault\":\"${fault:-impossible-travel}\"}"
+        echo
+
+  surge:
+    desc: Drive payments hard for twenty seconds
+    cmds:
+      - |
+        curl -sS -X POST http://localhost:8080/api/surge \
+          -H 'Content-Type: application/json' \
+          -d '{"perSecond":2000,"seconds":20}'
+        echo
+
+  stats:
+    desc: Current throughput and latency
+    cmds:
+      - curl -sS http://localhost:8080/api/stats
+
+  topics:
+    desc: Show the topics and their partitions
+    cmds:
+      - docker compose exec redpanda rpk topic list
+
+  dlq:
+    desc: Read the dead-letter topic
+    cmds:
+      - docker compose exec redpanda rpk topic consume vigil.dlq --num 20 --offset start

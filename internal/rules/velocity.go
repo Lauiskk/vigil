@@ -2,6 +2,7 @@ package rules
 
 import (
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/Lauiskk/vigil/internal/domain"
@@ -28,23 +29,35 @@ func (r Velocity) Eval(ev domain.Event, w *window.Sliding, now time.Time) *domai
 		return nil
 	}
 
+	// Grade by rate rather than by count. The rule fires the instant the
+	// limit is crossed — which is the point, detection should not wait — so
+	// the count at that moment is always limit+1 and would always grade as
+	// mild. The rate says how hard the key is being hammered, which is the
+	// difference between a busy customer and an attack.
 	span := w.Span()
+	observedPerSecond := ratePerSecond(count, span)
+	allowedPerSecond := 0.0
+	if r.Per > 0 {
+		allowedPerSecond = float64(r.Max) / r.Per.Seconds()
+	}
+
 	return &domain.Alert{
 		Rule:       r.Name(),
 		Stream:     ev.Stream,
 		Key:        ev.Key,
 		At:         ev.At,
 		DetectedAt: now,
-		Severity:   severityFor(float64(count), float64(r.Max)),
+		Severity:   severityFor(observedPerSecond, allowedPerSecond),
 		Title:      titleFor(ev.Stream, r.Name()),
 		Detail: fmt.Sprintf("%d events in %s (limit %d per %s)",
 			count, compactDuration(span), r.Max, compactDuration(r.Per)),
 		Evidence: map[string]any{
-			"count":     count,
-			"limit":     r.Max,
-			"spanMs":    span.Milliseconds(),
-			"windowMs":  r.Per.Milliseconds(),
-			"perSecond": ratePerSecond(count, span),
+			"count":            count,
+			"limit":            r.Max,
+			"spanMs":           span.Milliseconds(),
+			"windowMs":         r.Per.Milliseconds(),
+			"perSecond":        observedPerSecond,
+			"allowedPerSecond": math.Round(allowedPerSecond*100) / 100,
 		},
 		EventIDs: ids(pts, 12),
 	}
