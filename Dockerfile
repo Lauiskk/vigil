@@ -1,7 +1,7 @@
 # One Dockerfile, three services, selected by build argument. The services
 # share a module and differ only in their entry point, so three near-identical
 # files would be three places to forget to change something.
-ARG GO_VERSION=1.25
+ARG GO_VERSION=1.26
 
 FROM golang:${GO_VERSION}-alpine AS build
 ARG SERVICE

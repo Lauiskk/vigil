@@ -3,6 +3,14 @@
 /dist/
 *.exe
 
+# Terraform working files. The configuration is committed; state is not.
+.terraform/
+.terraform.lock.hcl
+.terraform-artifacts/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+
 # Test and coverage artefacts
 *.out
 coverage.html

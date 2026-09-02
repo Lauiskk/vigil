@@ -108,6 +108,59 @@ tasks:
       - docker compose up -d --scale processor=2
       - echo "now stop one and watch it reassign - docker compose logs -f processor"
 
+  # ── the aws tier ────────────────────────────────────────────────────────
+
+  lambda:build:
+    desc: Build the handler for the provided.al2023 runtime
+    cmds:
+      - mkdir -p dist
+      - CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/bootstrap ./lambda/alerts
+      - echo "dist/bootstrap built for arm64"
+
+  aws:up:
+    desc: Start LocalStack and the forwarder, then provision with Terraform
+    deps: [lambda:build]
+    cmds:
+      - docker compose --profile aws up -d --build localstack
+      - task: aws:apply
+      - docker compose --profile aws up -d --build forwarder
+      - echo "alerts now reach Lambda; read them with `task aws:alerts`"
+
+  aws:apply:
+    desc: Apply the Terraform against LocalStack
+    dir: infra/terraform
+    cmds:
+      - terraform init -input=false
+      - terraform apply -auto-approve -input=false -var 'localstack_endpoint=http://localhost:4566'
+
+  aws:plan:
+    desc: Plan against real AWS. Reads terraform.tfvars; applies nothing.
+    dir: infra/terraform
+    cmds:
+      - terraform init -input=false
+      - terraform plan -input=false
+
+  aws:alerts:
+    desc: Read the alerts Lambda has persisted to DynamoDB
+    cmds:
+      - |
+        # `rule` is a reserved word in DynamoDB expressions, so it has to go
+        # through an expression attribute name rather than be written plainly.
+        docker compose exec -T localstack awslocal dynamodb scan \
+          --table-name vigil-alerts --max-items 10 \
+          --projection-expression "pk,#r,severity,title,latencyMs" \
+          --expression-attribute-names '{"#r":"rule"}'
+
+  aws:logs:
+    desc: Tail the Lambda's CloudWatch logs
+    cmds:
+      - docker compose exec -T localstack awslocal logs tail /aws/lambda/vigil-alerts --follow
+
+  aws:down:
+    desc: Stop the AWS tier
+    cmds:
+      - docker compose --profile aws down
+
   # ── demonstrating it ────────────────────────────────────────────────────
 
   inject:

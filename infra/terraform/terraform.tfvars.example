@@ -1,0 +1,10 @@
+# Local: apply against LocalStack. Nothing here reaches AWS.
+localstack_endpoint = "http://localhost:4566"
+
+# Real AWS: comment the line above, then set at least the budget address.
+# The event source mapping is created only if kafka_brokers is non-empty.
+#
+# budget_alert_email = "you@example.com"
+# kafka_brokers      = ["your-cluster.aivencloud.com:12345"]
+# kafka_user         = "avnadmin"
+# kafka_password     = "..."   # prefer TF_VAR_kafka_password in the environment

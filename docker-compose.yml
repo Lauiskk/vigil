@@ -105,6 +105,64 @@ services:
       redpanda:
         condition: service_healthy
 
+  # The AWS tier, behind a profile: `docker compose --profile aws up`.
+  #
+  # LocalStack provides Lambda, DynamoDB, IAM, CloudWatch Logs and Secrets
+  # Manager locally, so the handler and the Terraform that provisions it are
+  # both exercised without an AWS account existing. infra/terraform applies
+  # against this or against real AWS from the same files.
+  localstack:
+    image: localstack/localstack:3.8
+    container_name: vigil_localstack
+    profiles: ["aws"]
+    restart: unless-stopped
+    environment:
+      SERVICES: lambda,dynamodb,iam,logs,sts,secretsmanager
+      DEBUG: "0"
+      LAMBDA_KEEPALIVE_MS: "300000"
+      # LocalStack starts a container per Lambda invocation, so it needs the
+      # daemon it is itself running under.
+      DOCKER_HOST: unix:///var/run/docker.sock
+    ports:
+      - "127.0.0.1:4566:4566"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - vigil_localstack:/var/lib/localstack
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/health | grep -q '\"lambda\": \"available\"'"]
+      interval: 6s
+      timeout: 5s
+      retries: 30
+      start_period: 25s
+
+  # Bridges vigil.alerts into Lambda.
+  #
+  # In AWS this process does not exist: a self-managed Kafka event source
+  # mapping has Lambda poll the topic itself (infra/terraform/esm.tf).
+  # LocalStack's free tier does not implement that event source, so locally
+  # the bridge is explicit. The handler accepts both shapes.
+  forwarder:
+    build:
+      context: .
+      args:
+        SERVICE: forwarder
+    container_name: vigil_forwarder
+    profiles: ["aws"]
+    restart: unless-stopped
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      KAFKA_GROUP: vigil-forwarder
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      ALERTS_FUNCTION: vigil-alerts
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+
   # Redpanda's own web UI: topics, partitions, consumer groups, and the
   # dead-letter contents. `docker compose --profile ui up`.
   console:
@@ -123,3 +181,5 @@ services:
 volumes:
   vigil_redpanda:
     name: vigil_redpanda
+  vigil_localstack:
+    name: vigil_localstack

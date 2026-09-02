@@ -147,7 +147,52 @@ KAFKA_BROKERS=localhost:19092 go run ./cmd/processor &
 KAFKA_BROKERS=localhost:19092 go run ./cmd/gateway
 ```
 
-Go 1.25+. Nothing else is required, and there are no credentials to configure.
+Go 1.26+ (required by `aws-lambda-go`). Nothing else is required, and there are no credentials to configure.
+
+## The AWS tier — implemented, and deliberately not applied
+
+An alert leaving the pipeline reaches a Go Lambda that enriches it and writes
+it to DynamoDB. The code and the Terraform that provisions it are complete;
+**no AWS account is involved**, and none is needed.
+
+```bash
+task aws:up        # LocalStack, terraform apply, forwarder
+task aws:alerts    # read what Lambda persisted
+task aws:logs      # tail the handler's CloudWatch logs
+```
+
+`infra/terraform` is one configuration with two targets. Setting
+`localstack_endpoint` points the provider at a container; leaving it empty
+points it at AWS. There is no separate "local" variant, because a second copy
+would drift from the real one and stop proving anything.
+
+**In AWS there is no bridge.** A self-managed Kafka event source mapping has
+Lambda poll `vigil.alerts` directly, batching fifty records per invocation —
+which is a cost control, not a tuning knob: the free allowance of a million
+requests a month is 0.39 invocations per second, and one-invocation-per-alert
+would cross it in an afternoon. LocalStack's free tier does not implement that
+event source, so `cmd/forwarder` does the same job locally. The handler accepts
+both shapes, so the code exercised on a laptop is the code that would run in
+AWS.
+
+The write is conditional on the alert id. An event source mapping is
+at-least-once, so redelivery after a partial batch failure is routine rather
+than exceptional — **verified by replaying the entire alert topic through a
+fresh consumer group and confirming the row count did not move.**
+
+Guard rails, because this is the part of the project that can charge money:
+
+| | |
+|---|---|
+| reserved concurrency | 5 — bounds a redelivery loop |
+| CloudWatch retention | 3 days — logs are the line item that surprises people |
+| DynamoDB | on-demand billing, 30-day TTL, no point-in-time recovery on data that can be rebuilt by replaying Kafka |
+| IAM | `PutItem` on one table and writes to one log group; not `AWSLambdaBasicExecutionRole` |
+| budget alarm | US$1, on both actual and forecast spend |
+
+Note also what is **not** in the Terraform: no NAT gateway, no load balancer,
+no MSK cluster. Those bill by the hour regardless of traffic and are how a
+"free" AWS demo becomes forty dollars a month.
 
 ## Five topics, and why that number is load-bearing
 
@@ -206,6 +251,7 @@ cmd/
   generator/   three simulators, rate control, fault injection
   processor/   consumer group → rules → alerts, dead letters, changelog
   gateway/     SSE fan-out, control API, and the embedded dashboard
+  forwarder/   bridges alerts into Lambda where no event source mapping exists
 internal/
   domain/      Event · Alert · Geo            ← pure, no I/O
   rules/       the five detection primitives  ← pure
@@ -218,8 +264,8 @@ internal/
   httpapi/     JSON, SSE broker, graceful shutdown
   telemetry/   latency percentiles and rates
 streams/       Kafka Streams topology (Java 21) — rolling metrics
-lambda/        Go handler for the event-driven tier
-infra/         Terraform (unapplied), and deploy configs
+lambda/alerts/ Go handler: enrich → DynamoDB, idempotent on alert id
+infra/         Terraform — one configuration, LocalStack or real AWS
 ```
 
 The five packages above the Kafka line are at **100% statement coverage** and
