@@ -45,6 +45,10 @@ func run(ctx context.Context, log *slog.Logger) error {
 	// this is set.
 	var proc atomic.Pointer[stream.Processor]
 
+	// Whether this processor can be counted on, which is not the same question
+	// as whether it is running. See internal/stream/readiness.go.
+	ready := stream.NewReadiness()
+
 	cl, err := kafkax.NewClient(cfg,
 		kgo.ConsumerGroup(env("KAFKA_GROUP", "vigil-processor")),
 		kgo.ConsumeTopics(kafkax.TopicEvents),
@@ -64,15 +68,20 @@ func run(ctx context.Context, log *slog.Logger) error {
 				return
 			}
 			log.Info("partitions assigned", "partitions", parts)
+			ready.Assigned(parts)
+
 			// Blocking here is deliberate: evaluating rules before the window
 			// store is loaded would silently miss every stateful anomaly.
-			if err := stream.Restore(ctx, cfg, eng, parts, log); err != nil {
+			err := stream.Restore(ctx, cfg, eng, parts, log)
+			if err != nil {
 				log.Error("state restore failed; continuing with what loaded", "err", err)
 			}
+			ready.Restored(err != nil)
 		}),
 
 		kgo.OnPartitionsRevoked(func(ctx context.Context, _ *kgo.Client, revoked map[string][]int32) {
 			log.Info("partitions revoked", "partitions", revoked[kafkax.TopicEvents])
+			ready.Revoked()
 			if p := proc.Load(); p != nil {
 				p.Flush(ctx)
 			}
@@ -105,7 +114,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 		}
 	}()
 
-	err = httpapi.Serve(ctx, env("PROC_ADDR", ":8082"), httpapi.CORS(routes(p, eng)), log)
+	err = httpapi.Serve(ctx, env("PROC_ADDR", ":8082"), httpapi.CORS(routes(p, eng, ready)), log)
 	wg.Wait()
 	return err
 }
@@ -127,10 +136,27 @@ func waitForBroker(ctx context.Context, cl *kgo.Client, log *slog.Logger) error 
 	return err
 }
 
-func routes(p *stream.Processor, eng *engine.Engine) http.Handler {
+func routes(p *stream.Processor, eng *engine.Engine, ready *stream.Readiness) http.Handler {
 	mux := http.NewServeMux()
+
+	// Liveness. If this answers at all the process is running, which is the
+	// only question a restart can settle.
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		httpapi.JSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
+	// Readiness, which is a different question: does this processor own
+	// partitions whose state it has actually replayed? Between joining the
+	// group and finishing the changelog replay it is running and useless, and
+	// during a rolling update that is exactly when the next replica must not
+	// be taken down.
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+		state := ready.State()
+		status := http.StatusOK
+		if !state.Ready {
+			status = http.StatusServiceUnavailable
+		}
+		httpapi.JSON(w, status, state)
 	})
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
 		es := eng.Stats()
