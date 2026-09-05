@@ -138,3 +138,76 @@ jobs:
           mkdir -p dist && touch dist/bootstrap
           terraform -chdir=infra/terraform init -backend=false -input=false
           terraform -chdir=infra/terraform validate
+
+  images:
+    name: images — build and publish to ghcr
+    runs-on: ubuntu-latest
+    # Only from main, and only once the code that goes in them is green.
+    # A pull request should not publish anything, and building five images on
+    # every branch push is minutes nobody gets back.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [go, java]
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: generator
+            context: .
+            dockerfile: Dockerfile
+            build-args: SERVICE=generator
+          - service: processor
+            context: .
+            dockerfile: Dockerfile
+            build-args: SERVICE=processor
+          - service: gateway
+            context: .
+            dockerfile: Dockerfile
+            build-args: SERVICE=gateway
+          - service: forwarder
+            context: .
+            dockerfile: Dockerfile
+            build-args: SERVICE=forwarder
+          # The JVM topology has its own context and its own base image, for
+          # the glibc reason recorded in streams/Dockerfile.
+          - service: streams
+            context: ./streams
+            dockerfile: streams/Dockerfile
+            build-args: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/vigil-${{ matrix.service }}
+          # No `latest`. An image tagged latest means the running version is
+          # whatever the registry answered when each pod happened to start,
+          # and two replicas of one Deployment can be different builds. The
+          # commit sha is the tag; the digest is what a manifest should pin.
+          tags: |
+            type=sha,format=long,prefix=
+            type=ref,event=tag
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          build-args: ${{ matrix.build-args }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
