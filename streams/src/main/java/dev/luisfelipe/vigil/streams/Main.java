@@ -30,6 +30,19 @@ public final class Main {
         KafkaStreams streams = new KafkaStreams(topology, config());
         CountDownLatch stopped = new CountDownLatch(1);
 
+        // Started before the stream, so an orchestrator gets an honest "not
+        // ready yet" during start-up rather than a connection refused it
+        // cannot tell apart from a crash.
+        Health health;
+        try {
+            health = Health.start(envInt("HEALTH_PORT", 8084), streams::state);
+            LOG.info("health listening on {}", envInt("HEALTH_PORT", 8084));
+        } catch (java.io.IOException e) {
+            LOG.error("could not bind the health port", e);
+            System.exit(1);
+            return;
+        }
+
         streams.setUncaughtExceptionHandler(throwable -> {
             LOG.error("stream thread died", throwable);
             // Replace the thread rather than killing the client. A single
@@ -39,6 +52,9 @@ public final class Main {
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             LOG.info("shutting down");
+            // Health first: stop telling anyone this instance is ready before
+            // spending ten seconds closing the stream.
+            health.close();
             streams.close(Duration.ofSeconds(10));
             stopped.countDown();
         }, "vigil-streams-shutdown"));
