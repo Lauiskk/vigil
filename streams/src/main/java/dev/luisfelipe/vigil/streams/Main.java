@@ -70,9 +70,16 @@ public final class Main {
 
         p.put(StreamsConfig.NUM_STREAM_THREADS_CONFIG, 1);
         p.put(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, 1000);
-        // The free-tier broker allows two partitions per topic and no more, so
-        // asking for a higher replication factor fails topic creation.
-        p.put(StreamsConfig.REPLICATION_FACTOR_CONFIG, 1);
+        // Replication for the internal topics Streams creates for itself --
+        // the repartition and changelog topics behind the aggregate.
+        //
+        // One is correct for the single-broker dev container and wrong
+        // everywhere else. On a cluster with min.insync.replicas >= 2, an
+        // RF=1 internal topic cannot satisfy an EXACTLY_ONCE_V2 transaction,
+        // and the topology fails at its first commit rather than at start-up
+        // -- which is the worst place to find out. It has to match the
+        // cluster it is pointed at, so it is read from the environment.
+        p.put(StreamsConfig.REPLICATION_FACTOR_CONFIG, envInt("REPLICATION_FACTOR", 1));
 
         String user = System.getenv("KAFKA_USER");
         if (user != null && !user.isBlank()) {
@@ -88,5 +95,34 @@ public final class Main {
     private static String env(String key, String fallback) {
         String v = System.getenv(key);
         return v == null || v.isBlank() ? fallback : v;
+    }
+
+    /**
+     * Reads an integer from the environment, falling back rather than dying.
+     *
+     * <p>A malformed replication factor is a typo in a deployment manifest,
+     * and refusing to start leaves the topology down until someone notices.
+     * Starting on the default and saying so loudly keeps the stream running
+     * while the typo is found.
+     */
+    static int envInt(String key, int fallback) {
+        return parseIntOr(key, System.getenv(key), fallback);
+    }
+
+    /**
+     * The parsing half of {@link #envInt}, split out because System.getenv
+     * cannot be set from a test and an untestable branch is one that will
+     * eventually be wrong.
+     */
+    static int parseIntOr(String key, String value, int fallback) {
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            LOG.warn("{} is not a number, falling back to {}: {}", key, fallback, value);
+            return fallback;
+        }
     }
 }
