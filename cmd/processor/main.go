@@ -76,12 +76,15 @@ func run(ctx context.Context, log *slog.Logger) error {
 			if err != nil {
 				log.Error("state restore failed; continuing with what loaded", "err", err)
 			}
-			ready.Restored(err != nil)
+			ready.Restored(parts, err != nil)
 		}),
 
 		kgo.OnPartitionsRevoked(func(ctx context.Context, _ *kgo.Client, revoked map[string][]int32) {
 			log.Info("partitions revoked", "partitions", revoked[kafkax.TopicEvents])
-			ready.Revoked()
+			// Only the partitions actually revoked. franz-go balances with
+			// cooperative-sticky, so this callback carries a subset and the
+			// member keeps the rest.
+			ready.Revoked(revoked[kafkax.TopicEvents])
 			if p := proc.Load(); p != nil {
 				p.Flush(ctx)
 			}

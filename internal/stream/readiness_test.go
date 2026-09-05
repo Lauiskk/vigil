@@ -28,7 +28,7 @@ func TestReadinessLifecycle(t *testing.T) {
 			name: "assigned and replayed is ready",
 			steps: func(r *Readiness) {
 				r.Assigned([]int32{0, 1})
-				r.Restored(false)
+				r.Restored([]int32{0, 1}, false)
 			},
 			ready:  true,
 			reason: "serving",
@@ -37,7 +37,7 @@ func TestReadinessLifecycle(t *testing.T) {
 			name: "a failed replay is still ready, and says so",
 			steps: func(r *Readiness) {
 				r.Assigned([]int32{0})
-				r.Restored(true)
+				r.Restored([]int32{0}, true)
 			},
 			ready:  true,
 			reason: "serving, but the changelog replay did not finish cleanly",
@@ -46,8 +46,8 @@ func TestReadinessLifecycle(t *testing.T) {
 			name: "a revoked assignment stops being ready",
 			steps: func(r *Readiness) {
 				r.Assigned([]int32{0, 1})
-				r.Restored(false)
-				r.Revoked()
+				r.Restored([]int32{0, 1}, false)
+				r.Revoked([]int32{0, 1})
 			},
 			ready:  false,
 			reason: "waiting for a partition assignment",
@@ -56,8 +56,8 @@ func TestReadinessLifecycle(t *testing.T) {
 			name: "a rebalance drops readiness until the new state is replayed",
 			steps: func(r *Readiness) {
 				r.Assigned([]int32{0, 1})
-				r.Restored(false)
-				r.Revoked()
+				r.Restored([]int32{0, 1}, false)
+				r.Revoked([]int32{0, 1})
 				r.Assigned([]int32{1})
 			},
 			ready:  false,
@@ -67,16 +67,51 @@ func TestReadinessLifecycle(t *testing.T) {
 			name: "a clean replay after a degraded one clears the flag",
 			steps: func(r *Readiness) {
 				r.Assigned([]int32{0})
-				r.Restored(true)
+				r.Restored([]int32{0}, true)
 				r.Assigned([]int32{0})
-				r.Restored(false)
+				r.Restored([]int32{0}, false)
 			},
 			ready:  true,
 			reason: "serving",
 		},
 		{
+			// The bug a two-member group on a real cluster found. franz-go
+			// balances with cooperative-sticky, so when a second member joins,
+			// the first is revoked only the partitions it is giving up and
+			// keeps the rest -- and is never re-assigned what it kept.
+			// Clearing the whole set on revocation left it reporting that it
+			// owned nothing while the group said otherwise, permanently.
+			name: "a cooperative revocation of one partition keeps the other",
+			steps: func(r *Readiness) {
+				r.Assigned([]int32{0, 1})
+				r.Restored([]int32{0, 1}, false)
+				r.Revoked([]int32{1})
+			},
+			ready:  true,
+			reason: "serving",
+		},
+		{
+			name: "a partition assigned but not replayed holds back one already serving",
+			steps: func(r *Readiness) {
+				r.Assigned([]int32{0})
+				r.Restored([]int32{0}, false)
+				r.Assigned([]int32{1})
+			},
+			ready:  false,
+			reason: "replaying the changelog",
+		},
+		{
+			name: "restoring a partition this member does not own changes nothing",
+			steps: func(r *Readiness) {
+				r.Assigned([]int32{0})
+				r.Restored([]int32{7}, false)
+			},
+			ready:  false,
+			reason: "replaying the changelog",
+		},
+		{
 			name:   "an empty assignment is not an assignment",
-			steps:  func(r *Readiness) { r.Assigned(nil); r.Restored(false) },
+			steps:  func(r *Readiness) { r.Assigned(nil); r.Restored([]int32{0, 1}, false) },
 			ready:  false,
 			reason: "waiting for a partition assignment",
 		},
@@ -124,6 +159,20 @@ func TestReadinessCopiesPartitions(t *testing.T) {
 	}
 }
 
+func TestReadinessReportsPartitionsInOrder(t *testing.T) {
+	// They come out of a map, and an endpoint whose output reorders itself
+	// between polls is one nobody can diff.
+	r := NewReadiness()
+	r.Assigned([]int32{3, 0, 2, 1})
+
+	got := r.State().Partitions
+	for i := range got {
+		if got[i] != int32(i) {
+			t.Fatalf("Partitions = %v, want [0 1 2 3]", got)
+		}
+	}
+}
+
 func TestReadinessIsSafeUnderConcurrency(t *testing.T) {
 	// The rebalance callbacks run on franz-go's goroutine while the probe is
 	// served on net/http's. Run with -race; without the mutex this fails.
@@ -136,10 +185,10 @@ func TestReadinessIsSafeUnderConcurrency(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < 200; j++ {
 				r.Assigned([]int32{int32(n)})
-				r.Restored(j%2 == 0)
+				r.Restored([]int32{int32(n)}, j%2 == 0)
 				_ = r.State()
 				_ = r.Ready()
-				r.Revoked()
+				r.Revoked([]int32{int32(n)})
 			}
 		}(i)
 	}
